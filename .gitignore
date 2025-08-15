@@ -1,0 +1,42 @@
+# Python virtual environment
+.venv/
+env/
+venv/
+
+# Python 
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit 
+.streamlit/secrets.toml
+.streamlit/cache/
+
+# Large data files
+data/*.zip
+data/*.tar
+data/*.gz
+*.sqlite
+*.db
+
+# Logs
+*.log
+
+# API keys and secrets
+*.env
+.env
+secrets.json
+config.json
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Might not be necessary-will revisit
+node_modules/
