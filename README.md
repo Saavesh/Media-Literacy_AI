@@ -26,7 +26,7 @@ This is a research and educational tool. It does **not** store or republish full
    - Quickly scan summaries for bias and potential harms.
    - Launch an in-depth article analysis with one click.
 
-3. **Sector & harm tags**:
+3. **Sector & Term tags**:
    - Automated tagging based on content keywords.
    - Maps stories to risk types (e.g., misinformation, bias, fraud).
 
@@ -49,9 +49,9 @@ streamlit run app.py
 Planned enhancements include:
 - **Additional API Sources** (GDELT, Media Bias/Fact Check, Google Fact Check Tools).
 - **Bias detection in multiple languages** for global news sources.
-- **Customizable bias word lists** so users can adapt detection to specific contexts.
+- **Customizable bias word lists** so users can apply detection for specific context.
 - **Automated scans** with stored analysis summaries.
-- **Exportable reports** (PDF/CSV) for research and classroom use.
+- **Exportable reports** (PDF/CSV) for research and educational use.
 
 ---
 
