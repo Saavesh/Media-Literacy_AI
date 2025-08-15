@@ -13,10 +13,12 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+data/
 
 # Streamlit 
 .streamlit/secrets.toml
 .streamlit/cache/
+.streamlit/
 
 # Large data files
 data/*.zip
