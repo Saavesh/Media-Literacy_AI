@@ -2,6 +2,7 @@
 .venv/
 env/
 venv/
+venv_test/
 
 # Python 
 __pycache__/
