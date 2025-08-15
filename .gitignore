@@ -41,3 +41,6 @@ config.json
 
 # Might not be necessary-will revisit
 node_modules/
+
+# Visual Studio Code settings
+.vscode/
