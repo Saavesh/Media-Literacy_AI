@@ -1,49 +1,67 @@
 import re
 import requests
 import tldextract
-import pandas as pd
-import plotly.express as px
 import streamlit as st
+from newsapi import NewsApiClient
 from bs4 import BeautifulSoup
 from readability import Document
 import textstat
 from textblob import TextBlob
-from typing import Optional
+
 
 # -----------------------
 # Page Config
 # -----------------------
-st.set_page_config(page_title="AI Ethics Dashboard", page_icon="🤖📰", layout="wide")
+st.set_page_config(
+    page_title="Media Bias & AI Incident Dashboard", page_icon="🤖📰", layout="wide"
+)
+st.markdown(
+    """
+<style>
+/* Make primary buttons stand out more */
+.stButton > button[kind="primary"] { padding: 0.7rem 1rem; font-weight: 600; }
+/* Clean up link spacing */
+.block-container a { text-decoration: none; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
 
 # -----------------------
-# Welcome & Overview
+# Title & Overview
 # -----------------------
-st.markdown("# Media Literacy Lab")
+st.title("Media Bias & AI Incident Dashboard")
 st.caption(
-    "A bridge between real AI incidents and how news covers them. Analyze a news article to spot bias/framing cues, "
-    "then compare with real-world AI incidents for context."
+    "A bridge between real AI incidents and how news covers them. Analyze a news article to spot bias and framing cues, "
+    "then compare headlines from live news sources for context."
 )
 st.info(
     "**How this dashboard works:**\n"
-    "1) **Analyze news coverage** – Paste a URL below to see language and framing signals.\n"
-    "2) **Explore real AI incidents** – Scroll down to browse a sample dataset of real AI-related events.\n"
-    "3) **Compare** – After an analysis, you'll see **similar incidents** suggested from the sample database."
+    "1) **Analyze news coverage**. Paste a URL below to see language and framing signals.\n"
+    "2) **Browse live headlines**. Use the search or the readable cards to explore current stories.\n"
+    "3) **Compare**. After an analysis, use the signals to think critically about patterns across stories."
 )
 st.markdown("---")
 
 
-# ===============
-# Style helper for compact charts
-# ===============
-def _compact(fig, title, h=260):
-    fig.update_layout(title=title, height=h, margin=dict(l=10, r=10, t=45, b=10))
-    fig.update_xaxes(tickangle=-25)
-    return fig
+# -----------------------
+# URL Analysis Queue helper
+# -----------------------
+def _queue_for_analysis(url: str):
+    st.session_state["url_to_analyze"] = url
 
 
-# ===============
-# URL Analyzer – fetch & extract
-# ===============
+# -----------------------
+# News API Key - Load and Initialize
+# -----------------------
+NEWSAPI_KEY = st.secrets["api_keys"]["newsapi"]
+newsapi = NewsApiClient(api_key=NEWSAPI_KEY)
+
+
+# ======================
+# Core helpers & analysis
+# ======================
 @st.cache_data(show_spinner=False, ttl=600)
 def fetch_and_extract(url: str):
     headers = {"User-Agent": "Mozilla/5.0 (educational noncommercial tool)"}
@@ -66,36 +84,56 @@ def fetch_and_extract(url: str):
     return {"title": title, "text": text.strip(), "links": links, "html_len": len(html)}
 
 
-# ===============
-# (Later) External API Spot
-# ===============
-# add an API (such as news classifier/toxicity/stance detection) here later.
-# Keep the function signature; just merge its outputs into `report`.
-#
-# def call_external_ai_api(text: str) -> dict:
-#     """
-#     Placeholder for a future API.
-#     Return dict like: {"toxicity": 0.12, "stance": "pro", "hallucination_risk": 0.3, ...}
-#     """
-#     implement
-#     return {}
-# ===============
+# ---------- helpers for evidence snippets ----------
+def _snippets(
+    text: str, pattern: str, *, pad_chars: int = 70, max_items: int = 12, flags=re.I
+):
+    """Return short context snippets around regex matches for display."""
+    if not text:
+        return []
+    seen, out = set(), []
+    for m in re.finditer(pattern, text, flags):
+        s = max(0, m.start() - pad_chars)
+        e = min(len(text), m.end() + pad_chars)
+        snippet = re.sub(r"\s+", " ", text[s:e].strip())
+        if snippet not in seen:
+            seen.add(snippet)
+            out.append(snippet)
+        if len(out) >= max_items:
+            break
+    return out
 
 
-# ========
-# Vocabulary Patterns
-# ===============
+def _unique_domains(links, article_url):
+    base = (
+        tldextract.extract(article_url).top_domain_under_public_suffix
+        if article_url
+        else ""
+    )
+    if not base:
+        return []
+    out, seen = [], set()
+    for href in links or []:
+        try:
+            d = tldextract.extract(href).top_domain_under_public_suffix
+            if d and d != base and d not in seen:
+                seen.add(d)
+                out.append(d)
+        except Exception:
+            pass
+    return out
+
+
+# ---------- vocabulary patterns ----------
 HEDGE_WORDS = (
     r"\b(may|might|could|possibly|reportedly|allegedly|suggests?|appears?|claims?)\b"
 )
-CLICKBAIT = r"\b(shocking|won't believe|this is why|you need to|exposed|revealed|the truth about)\b"
+CLICKBAIT = r"\b(shocking|won'?t believe|this is why|you need to|exposed|revealed|the truth about)\b"
 LOADED_WORDS = r"\b(disaster|outrage|corrupt|fraud|heroic|evil|traitor|hoax)\b"
 
 
-# ===============
-# Text analysis (quality, cues, linking)
-#  ===============
 def analyze_text(text: str, links: list, url: str):
+    # basic counts
     words = re.findall(r"\w+", (text or "").lower())
     word_count = len(words)
     sentence_count = max(
@@ -109,44 +147,70 @@ def analyze_text(text: str, links: list, url: str):
     polarity = round(blob.sentiment.polarity, 3)
     subjectivity = round(blob.sentiment.subjectivity, 3)
 
-    hedges = len(re.findall(HEDGE_WORDS, text or "", flags=re.I))
-    clickbait_hits = len(re.findall(CLICKBAIT, text or "", flags=re.I))
-    loaded_hits = len(re.findall(LOADED_WORDS, text or "", flags=re.I))
+    # evidence-based signals
+    hedge_snips = _snippets(text or "", HEDGE_WORDS)
+    clickbait_snips = _snippets(text or "", CLICKBAIT)
+    loaded_snips = _snippets(text or "", LOADED_WORDS)
     quotes = len(re.findall(r"“[^”]+”|\"[^\"]+\"", text or ""))
 
-    article_dom = tldextract.extract(url).registered_domain if url else ""
-    out_domains = []
-    for href in links or []:
-        try:
-            d = tldextract.extract(href).registered_domain
-            if d and d != article_dom:
-                out_domains.append(d)
-        except Exception:
-            pass
-    unique_sources = sorted(set(out_domains))
+    # title/lead sentence checks
+    first_line = (text or "").strip().split("\n", 1)[0]
+    title_clickbait_snips = _snippets(first_line, CLICKBAIT)
 
-    # For later: external API later, merge its metrics here into the dict returned
-    # api_metrics = call_external_ai_api(text)  # <- but later
+    # style markers
+    excess_punct_matches = list(re.finditer(r"[!?]{2,}", text or ""))
+    excess_punct = len(excess_punct_matches)
+    punct_snips = _snippets(text or "", r"[!?]{2,}", pad_chars=35)
+
+    caps_words = [
+        w
+        for w in re.findall(r"\b[A-Z]{4,}\b", text or "")
+        if w not in {"COVID", "USA", "NPR", "BBC"}
+    ]
+    caps_examples = sorted(set(caps_words))[:10]
+
+    # passive voice and sourcing
+    passive_snips = _snippets(
+        text or "", r"\b(?:was|were|is|are|been|being)\s+\w+ed\b(?:\s+by\b)?"
+    )
+    according_snips = _snippets(text or "", r"\baccording to\b")
+
+    # outgoing domains
+    unique_sources = _unique_domains(links, url)
+
     return {
+        # basics
         "word_count": word_count,
         "sentence_count": sentence_count,
         "flesch_kincaid_grade": round(fk, 1) if fk else 0.0,
         "gunning_fog": round(fog, 1) if fog else 0.0,
         "polarity": polarity,
         "subjectivity": subjectivity,
-        "hedge_count": hedges,
-        "clickbait_terms": clickbait_hits,
-        "loaded_terms": loaded_hits,
         "quote_count": quotes,
+        # counts
+        "hedge_count": len(hedge_snips),
+        "clickbait_terms": len(clickbait_snips),
+        "loaded_terms": len(loaded_snips),
+        "title_clickbait": len(title_clickbait_snips),
+        "excess_punct": excess_punct,
+        "all_caps_words": len(caps_words),
+        "passive_hits": len(passive_snips),
+        "according_to": len(according_snips),
+        # evidence
+        "hedge_examples": hedge_snips[:6],
+        "clickbait_examples": clickbait_snips[:6] or title_clickbait_snips[:3],
+        "loaded_examples": loaded_snips[:6],
+        "punct_examples": punct_snips[:6],
+        "caps_examples": caps_examples,
+        "passive_examples": passive_snips[:6],
+        "according_examples": according_snips[:6],
+        # linking
         "unique_source_count": len(unique_sources),
         "unique_sources": unique_sources[:12],
-        # ** when API is done  include: ** | **api_metrics**
     }
 
 
-# ===============
-# Keyword tagging for “Similar incidents”
-# ===============
+# ---------- light tagging for the "readable cards" ----------
 SECTOR_KEYWORDS = {
     "Healthcare": [
         "hospital",
@@ -194,7 +258,6 @@ SECTOR_KEYWORDS = {
     ],
     "Retail": ["ecommerce", "recommendation", "shopping", "customer", "ads"],
 }
-
 HARM_KEYWORDS = {
     "Bias/Discrimination": [
         "bias",
@@ -243,39 +306,7 @@ def extract_tags(text: str):
     return {"sectors": sorted(set(sector_hits)), "harms": sorted(set(harm_hits))}
 
 
-def rank_similar_incidents(df: pd.DataFrame, text: str, top_n: int = 5):
-    if df is None or df.empty:
-        return df
-
-    tags = extract_tags(text)
-    t = (text or "").lower()
-
-    def score_row(row):
-        s = 0
-        blob = f"{row.get('title','')} {row.get('summary','')} {row.get('what_went_wrong','')}".lower()
-        for _, kws in SECTOR_KEYWORDS.items():
-            s += sum(1 for kw in kws if kw in t and kw in blob)
-        for _, kws in HARM_KEYWORDS.items():
-            s += sum(1 for kw in kws if kw in t and kw in blob)
-        if tags["sectors"] and str(row.get("sector", "")) in tags["sectors"]:
-            s += 2
-        if tags["harms"] and str(row.get("harm_type", "")) in tags["harms"]:
-            s += 2
-        return s
-
-    scored = df.copy()
-    scored["_sim_score"] = scored.apply(score_row, axis=1)
-    scored = scored.sort_values("_sim_score", ascending=False)
-    scored = scored[scored["_sim_score"] > 0]
-    return scored.head(top_n).drop(columns=["_sim_score"], errors="ignore")
-
-
-# ===============
-# Render: article & stats & checklist
-# ===============
-def render_article_full(
-    title: str, text: str, report: dict, df_for_compare: Optional[pd.DataFrame] = None
-):
+def render_article_full(title: str, text: str, report: dict):
     st.subheader(title or "Untitled article")
     left, right = st.columns([2, 1])
 
@@ -289,128 +320,321 @@ def render_article_full(
 
     with right:
         st.markdown("### Quick stats")
-        st.metric("Words", report["word_count"])
-        st.metric("Sentences", report["sentence_count"])
-        st.metric("Reading grade (FK)", report["flesch_kincaid_grade"])
-        st.metric("Gunning Fog", report["gunning_fog"])
-        st.metric("Sentiment polarity", report["polarity"])
-        st.metric("Subjectivity", report["subjectivity"])
-        st.metric("Quotes in text", report["quote_count"])
-        st.metric("Hedging terms", report["hedge_count"])
-        st.metric("Clickbait cues", report["clickbait_terms"])
-        st.metric("Loaded terms", report["loaded_terms"])
-        st.metric("External sources", report["unique_source_count"])
-        if report["unique_sources"]:
+        st.metric("Words", report.get("word_count", 0))
+        st.metric("Sentences", report.get("sentence_count", 0))
+        st.metric("Reading grade (FK)", report.get("flesch_kincaid_grade", 0.0))
+        st.metric("Gunning Fog", report.get("gunning_fog", 0.0))
+        st.metric("Sentiment polarity", report.get("polarity", 0.0))
+        st.metric("Subjectivity", report.get("subjectivity", 0.0))
+        st.metric("Quotes in text", report.get("quote_count", 0))
+        st.metric("Hedging terms", report.get("hedge_count", 0))
+        st.metric("Clickbait cues", report.get("clickbait_terms", 0))
+        st.metric("Loaded terms", report.get("loaded_terms", 0))
+        st.metric("External sources", report.get("unique_source_count", 0))
+        if report.get("unique_sources"):
             st.caption("Sources referenced:")
             st.write(", ".join(report["unique_sources"]))
 
     st.markdown("---")
     st.markdown("### Media literacy checklist (auto-filled hints)")
 
-    hints = []
-    if report["subjectivity"] > 0.55:
-        hints.append(
-            "The language in this article is quite subjective. Pay attention to where it may be presenting opinions rather than objective facts."
-        )
-    if report["hedge_count"] > 5:
-        hints.append(
-            "This article uses many hedging words. These can indicate uncertainty or a lack of firm evidence."
-        )
-    if report["clickbait_terms"] > 0:
-        hints.append(
-            "Some phrases appear designed to grab attention. Consider whether the content matches the dramatic tone."
-        )
-    if report["loaded_terms"] > 3:
-        hints.append(
-            "The language includes emotionally charged words. This can influence how readers feel about the topic."
-        )
-    if report["unique_source_count"] < 2:
-        hints.append(
-            "Only a few outside sources are cited. Look for additional perspectives to get a fuller picture."
-        )
-    if report["flesch_kincaid_grade"] > 14:
-        hints.append(
-            "The reading level is quite high. Complex language can make claims harder to evaluate."
+    # Subjectivity
+    if report.get("subjectivity", 0) >= 0.5:
+        st.warning(
+            "• The tone is subjective. Check whether opinions are clearly labeled."
         )
 
-    if not hints:
-        st.success(
-            "No major concerns detected in these basic checks, but it’s still important to read critically."
-        )
-    else:
-        for h in hints:
-            st.warning("• " + h)
+    # Hedging
+    if report.get("hedge_count", 0) >= 4:
+        st.warning("• Many hedging terms suggest uncertainty.")
+        if report.get("hedge_examples"):
+            st.caption("Examples:")
+            for s in report["hedge_examples"]:
+                st.write(f"– {s}")
 
-    # Similar incidents from sample dataset
-    if df_for_compare is not None and not df_for_compare.empty and text:
-        st.markdown("---")
-        st.markdown("### Similar real incidents (from the sample AI incident database)")
-        matches = rank_similar_incidents(df_for_compare, text, top_n=5)
-        if matches is not None and not matches.empty:
-            for _, row in matches.iterrows():
-                with st.expander(
-                    f"{row.get('title','(untitled)')} – {row.get('year','')}",
-                    expanded=False,
-                ):
-                    st.write(
-                        f"**Sector:** {row.get('sector','')}  |  **Harm:** {row.get('harm_type','')}  |  **Risk:** {row.get('risk_severity','')}"
-                    )
-                    st.write(row.get("summary", ""))
-                    if str(row.get("source", "")).startswith("http"):
-                        st.markdown(f"[Source link]({row['source']})")
-        else:
-            st.caption("_No close matches found in the sample dataset._")
+    # Clickbait
+    if report.get("title_clickbait", 0) > 0 or report.get("clickbait_terms", 0) > 0:
+        st.warning("• Headline or body uses attention grabbing phrases.")
+        if report.get("clickbait_examples"):
+            st.caption("Examples:")
+            for s in report["clickbait_examples"]:
+                st.write(f"– {s}")
+
+    # Loaded language / emphasis
+    if (
+        report.get("loaded_terms", 0) >= 3
+        or report.get("excess_punct", 0) > 0
+        or report.get("all_caps_words", 0) >= 3
+    ):
+        st.warning(
+            "• Emotionally loaded wording or emphasis markers can steer interpretation."
+        )
+        if report.get("loaded_examples"):
+            st.caption("Examples:")
+            for s in report["loaded_examples"]:
+                st.write(f"– {s}")
+        if report.get("punct_examples"):
+            st.caption("Repeated punctuation:")
+            for s in report["punct_examples"]:
+                st.write(f"– {s}")
+        if report.get("caps_examples"):
+            st.caption("All-caps words:")
+            st.write(", ".join(report["caps_examples"]))
+
+    # Passive voice
+    if report.get("passive_hits", 0) >= 5:
+        st.warning(
+            "• Frequent passive voice can obscure responsibility. Look for named actors."
+        )
+        if report.get("passive_examples"):
+            st.caption("Examples:")
+            for s in report["passive_examples"]:
+                st.write(f"– {s}")
+
+    # Sourcing
+    if report.get("according_to", 0) < 1 and report.get("unique_source_count", 0) < 2:
+        st.warning(
+            "• Few attributions or outside sources. Seek independent corroboration."
+        )
+        if report.get("according_examples"):
+            st.caption("Mentions of 'according to':")
+            for s in report["according_examples"]:
+                st.write(f"– {s}")
+
+    # Reading level
+    if report.get("flesch_kincaid_grade", 0) >= 14:
+        st.warning(
+            "• Very high reading level. Dense language can make claims harder to check quickly."
+        )
 
     st.markdown("---")
 
 
-# ===============
-# Dataset utilities (load/normalize)
-#  ===============
-@st.cache_data
-def load_csv(file_like):
-    return pd.read_csv(file_like)
+# ======================
+# Interactive News Search
+# ======================
+st.subheader("Search news and analyze")
+
+q = st.text_input("Keyword(s)", value="artificial intelligence")
+mode = st.radio("Source", ["Top headlines", "Everything"], horizontal=True)
+
+if mode == "Top headlines":
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        country = st.selectbox("Country", ["us", "gb", "ca", "au"], index=0)
+    with c2:
+        cats = st.multiselect(
+            "Categories",
+            ["technology", "science", "business", "health", "entertainment", "sports"],
+            default=["technology", "science"],
+        )
+
+    if st.button("Search headlines"):
+        shown = set()
+        if not cats:
+            data = newsapi.get_top_headlines(q=q, country=country, page_size=8)
+            arts = data.get("articles", []) or []
+            if arts:
+                st.markdown(f"**Top headlines for** `{q}`")
+                for i, a in enumerate(arts):
+                    title = a.get("title") or "(no title)"
+                    url = a.get("url") or "#"
+                    source = (a.get("source") or {}).get("name") or "Unknown"
+                    if title in shown:
+                        continue
+                    shown.add(title)
+                    with st.container():
+                        st.markdown(f"**[{title}]({url})**")
+                        st.caption(source)
+                        st.button(
+                            "Analyze this article",
+                            key=f"analyze_headlines_{i}",
+                            on_click=_queue_for_analysis,
+                            args=(url,),
+                            type="primary",
+                            use_container_width=True,
+                        )
+            else:
+                st.write("No results.")
+        else:
+            for cat in cats:
+                data = newsapi.get_top_headlines(
+                    q=q, country=country, category=cat, page_size=5
+                )
+                arts = data.get("articles", []) or []
+                if arts:
+                    st.markdown(f"**{cat.capitalize()}**")
+                    for i, a in enumerate(arts):
+                        title = a.get("title") or "(no title)"
+                        url = a.get("url") or "#"
+                        source = (a.get("source") or {}).get("name") or "Unknown"
+                        if title in shown:
+                            continue
+                        shown.add(title)
+                        with st.container():
+                            st.markdown(f"**[{title}]({url})**")
+                            st.caption(source)
+                            st.button(
+                                "Analyze this article",
+                                key=f"analyze_{cat}_{i}",
+                                on_click=_queue_for_analysis,
+                                args=(url,),
+                            )
+else:
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        lang = st.selectbox("Language", ["en", "es", "fr", "de"], index=0)
+    with c2:
+        sort_by = st.selectbox(
+            "Sort by", ["relevancy", "popularity", "publishedAt"], index=0
+        )
+
+    if st.button("Search articles"):
+        data = newsapi.get_everything(q=q, language=lang, sort_by=sort_by, page_size=10)
+        arts = data.get("articles", []) or []
+        if arts:
+            st.markdown(f"**Articles for** `{q}`")
+            seen = set()
+            for i, a in enumerate(arts):
+                title = a.get("title") or "(no title)"
+                url = a.get("url") or "#"
+                source = (a.get("source") or {}).get("name") or "Unknown"
+                if title in seen:
+                    continue
+                seen.add(title)
+                with st.container():
+                    st.markdown(f"**[{title}]({url})**")
+                    st.caption(source)
+                    st.button(
+                        "Analyze this article",
+                        key=f"analyze_everything_{i}",
+                        on_click=_queue_for_analysis,
+                        args=(url,),
+                    )
+        else:
+            st.write("No results.")
 
 
-def normalize_cols(df):
-    cols = [
-        "id",
-        "title",
-        "year",
-        "country",
-        "sector",
-        "harm_type",
-        "risk_severity",
-        "stakeholders",
-        "summary",
-        "source",
-        "organization",
-        "what_went_wrong",
-        "prevention",
-        "topic",
-    ]
-    keep = [c for c in cols if c in df.columns]
-    df = df[keep].copy()
-    if "year" in df:
-        df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
-    for col in ["sector", "harm_type", "risk_severity", "country"]:
-        if col in df:
-            df[col] = df[col].astype(str).str.strip()
-    if "stakeholders" in df:
-        df["stakeholders"] = df["stakeholders"].fillna("").astype(str)
-    return df
+### make button bigger
 
 
-# Try to load bundled sample so “Similar incidents” works before any upload
-try:
-    df_sample = normalize_cols(load_csv("data/incidents.csv"))
-except Exception:
-    df_sample = pd.DataFrame()
+# -----------------------
+# If a URL was queued from the search, analyze it now
+# -----------------------
+queued = st.session_state.pop("url_to_analyze", None)
+if queued:
+    st.markdown("---")
+    st.subheader("Selected article analysis")
+    st.caption(f"Source: {queued}")
+
+    with st.spinner("Fetching and analyzing the selected article..."):
+        try:
+            data = fetch_and_extract(queued)
+            if not data["text"].strip():
+                st.warning(
+                    "I could not extract readable text from that page. Try another link."
+                )
+            else:
+                report = analyze_text(data["text"], data["links"], queued)
+                render_article_full(
+                    data["title"] or "Untitled article",
+                    data["text"],
+                    report,
+                )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 403:
+                st.error(
+                    "This site blocks automated extraction. Try a different article (Reuters, AP, BBC, NPR, etc.)."
+                )
+            else:
+                st.error(f"Could not fetch or analyze that URL: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Could not fetch or analyze that URL: {e}")
+            st.stop()
 
 
-# ===============
-# URL Input (primary)
-#  ===============
+# -----------------------
+# Readable cards (live from NewsAPI)
+# -----------------------
+def _risk_from_harm(harm_label: str) -> str:
+    if "Misinformation" in harm_label:
+        return "Medium"
+    if "Privacy" in harm_label or "Fraud" in harm_label:
+        return "High"
+    if "Safety" in harm_label:
+        return "High"
+    if "Bias" in harm_label:
+        return "Medium"
+    return "-"
+
+
+def _prevention_tip(harm_label: str) -> str:
+    if "Misinformation" in harm_label:
+        return "Cross-check multiple outlets, link to primary sources, and disclose uncertainty clearly."
+    if "Privacy" in harm_label:
+        return "Minimize data collection, get consent, and avoid sharing PII unless necessary."
+    if "Bias" in harm_label:
+        return "Audit datasets, document limitations, and include counter examples in evaluation."
+    if "Safety" in harm_label:
+        return "Test failure cases, document known hazards, and provide user warnings."
+    if "Fraud" in harm_label:
+        return "Use verification steps, stronger identity checks, and rate limit risky actions."
+    return ""
+
+
+st.subheader("Top AI stories with quick bias scan")
+st.caption(
+    "Live feed from NewsAPI. Click any story to open it or run the analyzer for a deeper scan."
+)
+
+with st.spinner("Loading top AI stories…"):
+    feed = newsapi.get_everything(
+        q="artificial intelligence", language="en", sort_by="publishedAt", page_size=5
+    )
+    articles = feed.get("articles", []) or []
+
+if not articles:
+    st.caption("No recent AI stories found.")
+else:
+    for i, a in enumerate(articles):
+        title = a.get("title") or "(untitled)"
+        url = a.get("url") or "#"
+        source_name = (a.get("source") or {}).get("name") or "Unknown source"
+        published = a.get("publishedAt") or ""
+        year = published[:4] if published else ""
+        desc = a.get("description") or ""
+
+        blob = f"{title} {desc}".strip().lower()
+        tags = extract_tags(blob)
+        sector = ", ".join(tags["sectors"]) if tags["sectors"] else "News/Media"
+        harm = (
+            ", ".join(tags["harms"]) if tags["harms"] else "Misinformation/Manipulation"
+        )
+        risk = _risk_from_harm(harm)
+        tip = _prevention_tip(harm)
+
+        header = f"{title}" + (f" ({year})" if year else "")
+        with st.expander(header, expanded=False):
+            st.write(f"**Sector:** {sector}  |  **Harm:** {harm}  |  **Risk:** {risk}")
+            st.write(f"**Source:** {source_name}")
+            if desc:
+                st.write(desc)
+            if tip:
+                st.write(f"**How to prevent:** {tip}")
+            if url != "#":
+                st.markdown(f"[Source link]({url})")
+            st.button(
+                "Analyze this article",
+                key=f"analyze_top_ai_{i}",
+                on_click=_queue_for_analysis,
+                args=(url,),
+            )
+
+
+# -----------------------
+# Manual URL Analyzer (form)
+# -----------------------
 st.markdown(
     """
 <style>
@@ -420,7 +644,6 @@ div[data-testid="stFormSubmitButton"] button { padding: 0.6rem 1.1rem; font-size
 """,
     unsafe_allow_html=True,
 )
-
 st.subheader("URL Analyzer")
 st.caption(
     "Paste any news article URL to scan for potential bias and misinformation signals."
@@ -435,7 +658,7 @@ with st.form("url_form"):
     submitted = st.form_submit_button("Analyze")
 
 st.info(
-    "The URL Analyzer evaluates the single article you submit. It does **not** change the incident dataset below."
+    "The URL Analyzer evaluates the single article you submit. It does not change any other content on this page."
 )
 
 if submitted and url:
@@ -447,7 +670,7 @@ if submitted and url:
             data = fetch_and_extract(url)
             if not data["text"].strip():
                 st.warning(
-                    "I couldn’t extract readable text from that page. Try another link or paste the article text below."
+                    "I could not extract readable text from that page. Try another link or paste the article text below."
                 )
                 st.stop()
             report = analyze_text(data["text"], data["links"], url)
@@ -455,164 +678,8 @@ if submitted and url:
             st.error(f"Could not fetch or analyze that URL: {e}")
             st.stop()
 
-    # Use df_sample for matching so it works even before any upload
     render_article_full(
         data["title"] or "Untitled article",
         data["text"],
         report,
-        df_for_compare=df_sample,
     )
-
-
-# ===============
-# AI Incident Database (Sample)
-# ===============
-st.header("AI Incident Database (Sample)")
-st.caption(
-    "Browse real-world AI-related incidents to compare patterns with the article you analyzed above."
-)
-
-with st.sidebar:
-    st.header("Dataset")
-    uploaded = st.file_uploader(
-        "Upload incidents CSV",
-        type=["csv"],
-        help="Headers must match the README schema.",
-    )
-    if uploaded is None:
-        df = df_sample.copy()
-        st.info("Using bundled sample file: `data/incidents.csv`")
-    else:
-        df = normalize_cols(load_csv(uploaded))
-        st.success(f"Custom dataset loaded: {uploaded.name}")
-
-    st.divider()
-    st.header("Filters")
-    years = (
-        sorted([int(y) for y in df["year"].dropna().unique()]) if "year" in df else []
-    )
-    year_sel = st.multiselect("Year", options=years, default=years)
-    sector_sel = st.multiselect(
-        "Sector",
-        options=sorted(df.get("sector", pd.Series(dtype=str)).dropna().unique()),
-        default=None,
-    )
-    harm_sel = st.multiselect(
-        "Harm type",
-        options=sorted(df.get("harm_type", pd.Series(dtype=str)).dropna().unique()),
-        default=None,
-    )
-    risk_sel = st.multiselect(
-        "Risk severity", options=["Low", "Medium", "High", "Critical"], default=None
-    )
-    country_sel = st.multiselect(
-        "Country",
-        options=sorted(df.get("country", pd.Series(dtype=str)).dropna().unique()),
-        default=None,
-    )
-
-dataset_source_msg = (
-    f"Source: your uploaded file **{uploaded.name}**."
-    if "uploaded" in locals() and uploaded is not None
-    else "Source: bundled sample file **data/incidents.csv**."
-)
-st.info(
-    "This section is a reference set of real incidents to give context while learning media literacy. "
-    "**It’s separate from the URL Analyzer** — analyzing a URL does not modify this dataset.  "
-    f"_{dataset_source_msg}_"
-)
-
-mask = pd.Series([True] * len(df))
-if "year" in df and year_sel:
-    mask &= df["year"].isin(year_sel)
-if sector_sel:
-    mask &= df["sector"].isin(sector_sel)
-if harm_sel:
-    mask &= df["harm_type"].isin(harm_sel)
-if risk_sel:
-    mask &= df["risk_severity"].isin(risk_sel)
-if country_sel:
-    mask &= df["country"].isin(country_sel)
-
-fdf = df[mask].copy()
-
-left, mid, right = st.columns(3)
-with left:
-    st.metric("Incidents", len(fdf))
-with mid:
-    top_sector = (
-        fdf["sector"].mode().iat[0] if "sector" in fdf and not fdf.empty else "-"
-    )
-    st.metric("Most common sector", top_sector)
-with right:
-    top_harm = (
-        fdf["harm_type"].mode().iat[0] if "harm_type" in fdf and not fdf.empty else "-"
-    )
-    st.metric("Top harm type", top_harm)
-
-st.divider()
-
-st.subheader("Incident details")
-st.dataframe(fdf, use_container_width=True)
-
-st.subheader("Readable cards")
-for _, row in fdf.iterrows():
-    with st.expander(
-        f"{row.get('title','(untitled)')} - {row.get('year','')}", expanded=False
-    ):
-        st.write(
-            f"**Sector:** {row.get('sector','')}  |  **Harm:** {row.get('harm_type','')}  |  **Risk:** {row.get('risk_severity','')}"
-        )
-        st.write(
-            f"**Country:** {row.get('country','')}  |  **Stakeholders:** {row.get('stakeholders','')}"
-        )
-        st.write(row.get("summary", ""))
-        if row.get("what_went_wrong"):
-            st.write(f"**What went wrong:** {row.get('what_went_wrong', '')}")
-        if row.get("prevention"):
-            st.write(f"**How to prevent:** {row.get('prevention', '')}")
-        if str(row.get("source", "")).startswith("http"):
-            st.markdown(f"[Source link]({row['source']})")
-
-st.divider()
-st.download_button(
-    label="Download filtered CSV",
-    data=fdf.to_csv(index=False).encode("utf-8"),
-    file_name="filtered_incidents.csv",
-    mime="text/csv",
-)
-
-
-# ===============
-#  Charts (might take out at the end)
-#  ===============
-with st.expander("Explore charts (optional)", expanded=False):
-    colA, colB = st.columns(2)
-
-    with colA:
-        if "harm_type" in fdf and not fdf.empty:
-            harm_counts = fdf["harm_type"].value_counts().reset_index()
-            harm_counts.columns = ["harm_type", "count"]
-            fig = px.bar(harm_counts, x="harm_type", y="count")
-            st.plotly_chart(
-                _compact(fig, "Incidents by harm type"), use_container_width=True
-            )
-
-    with colB:
-        if "sector" in fdf and not fdf.empty:
-            sec_counts = fdf["sector"].value_counts().reset_index()
-            sec_counts.columns = ["sector", "count"]
-            fig2 = px.bar(sec_counts, x="sector", y="count")
-            st.plotly_chart(
-                _compact(fig2, "Incidents by sector"), use_container_width=True
-            )
-
-    if "organization" in fdf and not fdf["organization"].fillna("").eq("").all():
-        org_counts = (
-            fdf["organization"].replace("", pd.NA).dropna().value_counts().reset_index()
-        )
-        org_counts.columns = ["organization", "count"]
-        fig3 = px.bar(org_counts, x="organization", y="count")
-        st.plotly_chart(
-            _compact(fig3, "Incidents by organization"), use_container_width=True
-        )
